@@ -1,7 +1,8 @@
+
 import asyncio, json, os, re
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
-import aiohttp
+import requests
 from bs4 import BeautifulSoup
 from threading import Thread
 from flask import Flask
@@ -52,7 +53,6 @@ HEADERS = {
 
 async def fetch_all_tenders(filters=None):
     tenders=[]; now=datetime.now()
-    # Demo tenderlar - real API bloklagani uchun demo, keyin real qo'shamiz
     tenders.append({
         "id": "lot_12345",
         "lot_number": "12345",
@@ -64,11 +64,8 @@ async def fetch_all_tenders(filters=None):
         "link": "https://xarid.uzex.uz/lot/12345"
     })
     try:
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
-            async with session.get("https://xarid.uzex.uz/", timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status==200:
-                    html=await r.text()
-                    print(f"xarid sahifasi {len(html)}")
+        r=requests.get("https://xarid.uzex.uz/", headers=HEADERS, timeout=10)
+        print(f"xarid sahifasi {len(r.text)}")
     except Exception as e:
         print(f"fetch xato {e}")
     print(f"JAMI: {len(tenders)} ta")
