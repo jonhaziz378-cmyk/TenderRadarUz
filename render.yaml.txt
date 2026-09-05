@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tender-bot
+    env: python
+    plan: free
+    pythonVersion: "3.11.9"
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
