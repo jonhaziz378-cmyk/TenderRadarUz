@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     pythonVersion: "3.11.9"
-    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     healthCheckPath: /health
     envVars:
