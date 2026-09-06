@@ -2,14 +2,11 @@ services:
   - type: web
     name: tender-bot
     env: python
-    plan: free
-    pythonVersion: "3.11.9"
-    buildCommand: |
-      pip install -r requirements.txt
-      playwright install chromium
-      playwright install-deps chromium || true
-    startCommand: python bot.py
-    healthCheckPath: /health
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Bot_Render.py
     envVars:
       - key: BOT_TOKEN
-        sync: false
+        scope: run
+      - key: PROXY_URL
+        scope: run
