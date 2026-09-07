@@ -1,31 +1,35 @@
-import asyncio, json, os, re, logging
+import os, json, requests, re, time
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, executor, types
-import aiohttp
-from bs4 import BeautifulSoup
 from threading import Thread
+from flask import Flask
+import telebot
+from telebot.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from bs4 import BeautifulSoup
+import traceback
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8776730597:AAFF8PMTN_qvUdf-b-7Js4s8uGm_7B8PoME")
 DB_FILE = "users.json"
-
 VILOYATLAR = ["Toshkent sh", "Toshkent vil", "Samarqand", "Buxoro", "Andijon", "Farg'ona", "Namangan", "Qashqadaryo", "Surxondaryo", "Xorazm", "Navoiy", "Jizzax", "Sirdaryo", "Qoraqalpog'iston"]
 KATEGORIYALAR = ["Qurilish", "IT kompyuter", "Tibbiyot dori", "Oziq-ovqat", "Mebel jihoz", "Transport", "Kantselyariya"]
 
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
-dp = Dispatcher(bot)
+bot = telebot.TeleBot(BOT_TOKEN)
+flask_app = Flask(__name__)
+@flask_app.route('/')
+def home(): return f"Bot alive {datetime.now()}"
+@flask_app.route('/health')
+def health(): return "OK"
+def run_flask():
+    port=int(os.environ.get('PORT',10000))
+    flask_app.run(host='0.0.0.0',port=port)
+Thread(target=run_flask,daemon=True).start()
 
 def load_users():
     if not os.path.exists(DB_FILE): return {}
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f: return json.load(f)
     except: return {}
-
 def save_users(u):
     with open(DB_FILE, "w", encoding="utf-8") as f: json.dump(u, f, ensure_ascii=False, indent=2)
-
 def get_or_create(uid, username=""):
     users=load_users(); suid=str(uid)
     if suid not in users:
@@ -33,230 +37,221 @@ def get_or_create(uid, username=""):
         save_users(users)
     return users[suid]
 
-def check_access(uid):
-    users=load_users(); u=users.get(str(uid))
-    if not u: return False,0
-    days=(datetime.now()-datetime.fromisoformat(u["start_date"])).days
-    if u.get("is_paid"): return True,999
-    if days<=7: return True,7-days
-    return False,0
-
-# Kuchli headers
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "text/html,application/xhtml+xml",
-    "Accept-Language": "uz-UZ,uz;q=0.9",
-    "Referer": "https://xt-xarid.uz/",
-    "Connection": "keep-alive"
+BYPASS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "uz-UZ,uz;q=0.9,ru-RU;q=0.8,ru;q=0.7,en-US;q=0.6,en;q=0.5",
+    "Referer": "https://etender.uzex.uz/",
+    "Upgrade-Insecure-Requests": "1",
 }
 
-async def fetch_all_tenders(filters=None):
-    """xt-xarid.uz saytidan tenderlarni olib kelish"""
-    tenders = []
-    
+def fetch_with_curl_cffi(url):
     try:
-        logger.info("📍 Tenderlar qidirilmoqda...")
-        
-        proxy_url = os.environ.get("PROXY_URL", "")
-        
-        async with aiohttp.ClientSession(headers=HEADERS, connector=aiohttp.TCPConnector(ssl=False)) as session:
+        from curl_cffi import requests as c_requests
+        r = c_requests.get(url, impersonate="chrome122", headers=BYPASS_HEADERS, timeout=20)
+        if r.status_code == 200 and len(r.text) > 1000:
+            if "Attention Required" in r.text or "cf-challenge" in r.text or "Checking your browser" in r.text:
+                return None
+            return r.text
+    except Exception:
+        pass
+    return None
+
+def fetch_with_requests(url, is_json=False):
+    try:
+        headers = BYPASS_HEADERS.copy()
+        if is_json:
+            headers["Accept"] = "application/json"
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200 and len(r.text) > 500:
+            if "Attention Required" in r.text[:2000] or "cf-challenge" in r.text[:2000]:
+                return None
+            return r.text
+    except Exception:
+        pass
+    return None
+
+def parse_tenders_from_json(text):
+    tenders=[]
+    try:
+        j = json.loads(text) if isinstance(text, str) else text
+        items = []
+        if isinstance(j, list):
+            items = j
+        elif isinstance(j, dict):
+            items = j.get('content') or j.get('data') or j.get('items') or j.get('result') or j.get('lots') or []
+            if isinstance(items, dict):
+                items = items.get('content') or items.get('items') or []
+        for it in items[:20]:
+            if not isinstance(it, dict):
+                continue
+            name = it.get('title') or it.get('name') or it.get('lotName') or it.get('productName') or it.get('subject') or it.get('description') or ''
+            if len(name.strip()) < 15:
+                continue
+            lot_id = str(it.get('id') or it.get('lotId') or it.get('lotNumber') or it.get('number') or '')[:20]
+            budget = it.get('budget') or it.get('amount') or it.get('price') or it.get('startPrice') or 0
             try:
-                async with session.get(
-                    "https://xt-xarid.uz/oz/tenders", 
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    proxy=proxy_url if proxy_url else None
-                ) as r:
-                    if r.status == 200:
-                        html = await r.text()
-                        logger.info(f"✅ Sahifa yuklab olindi: {len(html)} baitlar")
-                        
-                        soup = BeautifulSoup(html, 'html.parser')
-                        tender_rows = soup.select('tr')
-                        logger.info(f"📊 Topilgan qatorlar: {len(tender_rows)}")
-                        
-                        for row in tender_rows[:50]:
-                            try:
-                                cells = row.find_all('td')
-                                if len(cells) < 5: continue
-                                
-                                lot_num = cells[0].get_text(strip=True)
-                                tender_name = cells[1].get_text(strip=True)
-                                region = cells[2].get_text(strip=True) if len(cells) > 2 else "Noma'lum"
-                                budget_text = cells[3].get_text(strip=True) if len(cells) > 3 else "0"
-                                deadline_text = cells[4].get_text(strip=True) if len(cells) > 4 else ""
-                                
-                                # Budget
-                                budget = 0
-                                try:
-                                    budget_num = ''.join(filter(str.isdigit, budget_text.split()[0] if budget_text else "0"))
-                                    budget = int(budget_num) if budget_num else 0
-                                except: 
-                                    budget = 0
-                                
-                                # Deadline
-                                deadline_days = 0
-                                deadline_date = (datetime.now() + timedelta(days=7)).strftime("%d.%m.%Y")
-                                
-                                try:
-                                    if "kun" in deadline_text.lower():
-                                        days_match = re.search(r'(\d+)', deadline_text)
-                                        if days_match:
-                                            deadline_days = int(days_match.group(1))
-                                            deadline_date = (datetime.now() + timedelta(days=deadline_days)).strftime("%d.%m.%Y")
-                                except:
-                                    pass
-                                
-                                # Link
-                                link_elem = row.find('a')
-                                link = link_elem['href'] if link_elem and link_elem.get('href') else f"https://xt-xarid.uz/oz/tenders?lot={lot_num}"
-                                if not link.startswith('http'):
-                                    link = f"https://xt-xarid.uz{link}"
-                                
-                                # Filter - sham tenderlar
-                                if not tender_name or budget == 0 or not lot_num:
-                                    continue
-                                
-                                tender_id = f"lot_{lot_num}_{datetime.now().timestamp()}"
-                                
-                                tender = {
-                                    "id": tender_id,
-                                    "lot_number": lot_num,
-                                    "name": tender_name,
-                                    "budget": budget,
-                                    "region": region,
-                                    "deadline": deadline_days if deadline_days > 0 else 7,
-                                    "deadline_date": deadline_date,
-                                    "link": link,
-                                    "fetched_at": datetime.now().isoformat()
-                                }
-                                
-                                tenders.append(tender)
-                                logger.info(f"✓ {tender_name[:50]} - {budget:,} so'm")
-                                
-                            except Exception as e:
-                                logger.error(f"Row error: {e}")
-                                continue
-                    else:
-                        logger.error(f"❌ Status: {r.status}")
-                        
-            except asyncio.TimeoutError:
-                logger.error("⏱ Timeout")
-            except Exception as e:
-                logger.error(f"Request error: {e}")
-        
-        logger.info(f"✅ Jami: {len(tenders)} ta tender")
-        
-    except Exception as e:
-        logger.error(f"Error: {e}")
-    
+                budget = int(float(str(budget).replace(' ','').replace(',','')))
+            except:
+                budget = 0
+            region = it.get('region') or it.get('regionName') or it.get('customerRegion') or 'Toshkent sh'
+            link = it.get('url') or f"https://etender.uzex.uz/lot/{lot_id}"
+            if not link.startswith('http'):
+                link = f"https://etender.uzex.uz{link}"
+            tenders.append({
+                "id": lot_id or f"{int(time.time())%100000}",
+                "lot_number": lot_id,
+                "name": name[:280],
+                "budget": budget,
+                "region": str(region)[:50],
+                "deadline_date": (datetime.now()+timedelta(days=3)).strftime("%d.%m.%Y"),
+                "link": link
+            })
+    except Exception:
+        pass
     return tenders
 
-def filter_tenders(tenders, f):
-    """Filtrlash"""
-    res = tenders
-    res = [t for t in res if t.get("budget", 0) > 100000]
-    res = [t for t in res if t.get("name", "").strip()]
-    
+def parse_tenders_from_html(html):
+    tenders=[]
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            txt = a.get_text(strip=True)
+            href = a['href']
+            if 30 < len(txt) < 300 and ('lot' in href.lower() or len(txt) > 60):
+                if not href.startswith('http'):
+                    href = f"https://etender.uzex.uz{href}" if href.startswith('/') else f"https://etender.uzex.uz/{href}"
+                lot_num = re.search(r'(\d{4,})', href)
+                lot_num = lot_num.group(1) if lot_num else str(int(time.time())%1000000)
+                tenders.append({
+                    "id": lot_num,
+                    "lot_number": lot_num,
+                    "name": txt[:280],
+                    "budget": 0,
+                    "region": "Toshkent sh",
+                    "deadline_date": (datetime.now()+timedelta(days=3)).strftime("%d.%m.%Y"),
+                    "link": href
+                })
+                if len(tenders) >= 12:
+                    break
+    except Exception:
+        pass
+    return tenders
+
+def fetch_real_tenders():
+    open_apis = [
+        "https://etender.uzex.uz/api/frontend/lots?size=30&page=0&sort=id,desc",
+        "https://etender.uzex.uz/api/lots?size=30&page=0",
+        "https://exarid.uzex.uz/api/lots?size=20",
+    ]
+    for url in open_apis:
+        html = fetch_with_curl_cffi(url)
+        if not html:
+            html = fetch_with_requests(url, is_json=True)
+        if html:
+            tenders = parse_tenders_from_json(html)
+            if tenders:
+                return tenders
+    html_pages = [
+        "https://etender.uzex.uz/lots",
+        "https://exarid.uzex.uz/",
+    ]
+    for url in html_pages:
+        html = fetch_with_curl_cffi(url)
+        if not html:
+            html = fetch_with_requests(url)
+        if html:
+            tenders = parse_tenders_from_html(html)
+            if tenders:
+                return tenders
+    return []
+
+def filter_tenders(tenders,f):
+    if not tenders:
+        return tenders
+    res=tenders
     if f.get("regions"):
-        res = [t for t in res if any(r.lower() in t["region"].lower() for r in f["regions"])]
-    
+        res=[t for t in res if any(r.lower() in t["region"].lower() or r.lower() in t["name"].lower() for r in f["regions"])]
     if f.get("categories"):
-        res = [t for t in res if any(c.lower() in t["name"].lower() for c in f["categories"])]
-    
+        res=[t for t in res if any(c.lower() in t["name"].lower() for c in f["categories"])]
     return res
 
-def make_kb(items, selected, prefix):
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-    kb=[]; row=[]
-    for it in items:
-        mark="✅" if it in selected else "⬜"
-        row.append(InlineKeyboardButton(text=f"{mark} {it}", callback_data=f"{prefix}:{it}"))
-        if len(row)==2: kb.append(row); row=[]
-    if row: kb.append(row)
-    kb.append([InlineKeyboardButton(text="💾 Saqlash", callback_data=f"{prefix}:SAVE")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-@dp.message_handler(commands=['start'])
-async def start(m: types.Message):
+@bot.message_handler(commands=['start'])
+def start(m):
     get_or_create(m.from_user.id, m.from_user.username or "")
-    access,left=check_access(m.from_user.id)
-    kb=[[types.KeyboardButton(text="📍 Viloyat"), types.KeyboardButton(text="💼 Kategoriya")],[types.KeyboardButton(text="🔎 Mening tenderlarim")],[types.KeyboardButton(text="⚙️ Filtrim")]]
-    if access:
-        u=load_users()[str(m.from_user.id)]; f=u["filters"]
-        vil=", ".join(f["regions"]) or "Hammasi"; kat=", ".join(f["categories"]) or "Hammasi"
-        left_txt="Cheksiz" if left==999 else f"{left} kun"
-        await m.answer(f"👋 Salom!\n📊 {left_txt}\n📍 {vil}\n💼 {kat}", reply_markup=types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True))
-    else:
-        await m.answer("7 kun tugadi!")
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("📍 Viloyat"), KeyboardButton("💼 Kategoriya"))
+    kb.add(KeyboardButton("🔎 Mening tenderlarim"))
+    kb.add(KeyboardButton("⚙️ Filtrim"))
+    bot.send_message(m.chat.id, 
+        f"👋 Salom, {m.from_user.first_name}!\n\n"
+        f"Men tender botman. Sizga O'zbekiston bo'yicha eng yangi tenderlarni topib beraman.\n\n"
+        f"📍 Viloyatingizni va 💼 kategoriyani tanlang, so'ng 🔎 Mening tenderlarim ni bosing.\n\n"
+        f"Har kuni yangi imkoniyatlarni o'tkazib yubormang!",
+        reply_markup=kb)
 
-@dp.message_handler(lambda m: m.text=="📍 Viloyat")
-async def ask_reg(m: types.Message):
-    sel=load_users()[str(m.from_user.id)]["filters"]["regions"]
-    await m.answer("Viloyat tanlang:", reply_markup=make_kb(VILOYATLAR, sel, "REG"))
+@bot.message_handler(func=lambda m: m.text=="📍 Viloyat")
+def ask_reg(m):
+    users=load_users(); sel=users.get(str(m.from_user.id), {}).get("filters",{}).get("regions",[])
+    kb=InlineKeyboardMarkup(row_width=2)
+    for it in VILOYATLAR:
+        kb.add(InlineKeyboardButton(f"{'✅' if it in sel else '⬜'} {it}", callback_data=f"REG:{it}"))
+    kb.add(InlineKeyboardButton("💾 Saqlash", callback_data="REG:SAVE"))
+    bot.send_message(m.chat.id, "Viloyat tanlang:", reply_markup=kb)
 
-@dp.message_handler(lambda m: m.text=="💼 Kategoriya")
-async def ask_cat(m: types.Message):
-    sel=load_users()[str(m.from_user.id)]["filters"]["categories"]
-    await m.answer("Kategoriya tanlang:", reply_markup=make_kb(KATEGORIYALAR, sel, "CAT"))
+@bot.message_handler(func=lambda m: m.text=="💼 Kategoriya")
+def ask_cat(m):
+    users=load_users(); sel=users.get(str(m.from_user.id), {}).get("filters",{}).get("categories",[])
+    kb=InlineKeyboardMarkup(row_width=2)
+    for it in KATEGORIYALAR:
+        kb.add(InlineKeyboardButton(f"{'✅' if it in sel else '⬜'} {it}", callback_data=f"CAT:{it}"))
+    kb.add(InlineKeyboardButton("💾 Saqlash", callback_data="CAT:SAVE"))
+    bot.send_message(m.chat.id, "Kategoriya tanlang:", reply_markup=kb)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("REG:") or c.data.startswith("CAT:"))
-async def toggle(c: types.CallbackQuery):
+@bot.callback_query_handler(func=lambda c: True)
+def toggle(c):
     users=load_users(); uid=str(c.from_user.id); pref,val=c.data.split(":",1); key="regions" if pref=="REG" else "categories"
+    if uid not in users: get_or_create(c.from_user.id); users=load_users()
     if val=="SAVE":
-        save_users(users); await c.message.edit_text(f"✅ Saqlandi!"); await c.answer(); return
+        bot.edit_message_text(f"✅ Saqlandi: {', '.join(users[uid]['filters'][key]) or 'Hammasi'}", c.message.chat.id, c.message.message_id)
+        bot.answer_callback_query(c.id, "Saqlandi!")
+        return
     sel=users[uid]["filters"][key]
     if val in sel: sel.remove(val)
     else: sel.append(val)
     users[uid]["filters"][key]=sel; save_users(users)
-    kb=make_kb(VILOYATLAR if pref=="REG" else KATEGORIYALAR, sel, pref)
-    try: await c.message.edit_reply_markup(reply_markup=kb)
+    kb=InlineKeyboardMarkup(row_width=2)
+    items=VILOYATLAR if pref=="REG" else KATEGORIYALAR
+    for it in items:
+        kb.add(InlineKeyboardButton(f"{'✅' if it in sel else '⬜'} {it}", callback_data=f"{pref}:{it}"))
+    kb.add(InlineKeyboardButton("💾 Saqlash", callback_data=f"{pref}:SAVE"))
+    try: bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=kb)
     except: pass
-    await c.answer()
+    bot.answer_callback_query(c.id, f"{len(sel)} ta")
 
-@dp.message_handler(lambda m: m.text=="⚙️ Filtrim")
-async def show_f(m: types.Message):
-    f=load_users()[str(m.from_user.id)]["filters"]
-    await m.answer(f"📍 {', '.join(f['regions']) or 'Hammasi'}\n💼 {', '.join(f['categories']) or 'Hammasi'}")
+@bot.message_handler(func=lambda m: m.text=="⚙️ Filtrim")
+def show_f(m):
+    f=load_users().get(str(m.from_user.id), {}).get("filters",{})
+    bot.send_message(m.chat.id, f"📍 Viloyatlar: {', '.join(f.get('regions',[])) or 'Hammasi'}\n💼 Kategoriyalar: {', '.join(f.get('categories',[])) or 'Hammasi'}")
 
-@dp.message_handler(lambda m: m.text=="🔎 Mening tenderlarim")
-async def my_tenders(m: types.Message):
-    access,_=check_access(m.from_user.id)
-    if not access:
-        await start(m); return
-    
-    users=load_users(); f=users[str(m.from_user.id)]["filters"]
-    sent_ids = set(users[str(m.from_user.id)].get("sent_ids", []))
-    
-    await m.answer("⏳ Qidirilmoqda...")
-    
-    all_t = await fetch_all_tenders(f)
-    filtered = filter_tenders(all_t, f)
-    
-    if not filtered:
-        await m.answer("❌ Tender yo'q")
-        return
-    
-    new_tenders = [t for t in filtered if t["id"] not in sent_ids]
-    
-    if not new_tenders:
-        await m.answer(f"📋 Siz {len(filtered)} ta tenderni ko'rgan ekansiz")
-        return
-    
-    text = f"🔥 YA'NI: {len(new_tenders)} ta tender\n\n"
-    
-    for t in new_tenders[:10]:
-        budget_formatted = f"{t['budget']:,}".replace(",", " ")
-        text += f"📦 {t['name'][:60]}\n"
-        text += f"🔢 {t['lot_number']} | 💰 {budget_formatted} so'm\n"
-        text += f"📍 {t['region']} | ⏰ {t['deadline_date']}\n"
-        text += f"🔗 {t['link']}\n\n"
-    
-    new_sent_ids = sent_ids | {t["id"] for t in new_tenders}
-    users[str(m.from_user.id)]["sent_ids"] = list(new_sent_ids)[-200:]
-    save_users(users)
-    
-    await m.answer(text, disable_web_page_preview=True)
+@bot.message_handler(func=lambda m: m.text=="🔎 Mening tenderlarim")
+def my_tenders(m):
+    bot.send_message(m.chat.id, "⏳ Tenderlar qidirilmoqda...")
+    try:
+        all_t = fetch_real_tenders()
+        f=load_users().get(str(m.from_user.id), {}).get("filters",{})
+        filtered=filter_tenders(all_t,f)
+        if not filtered:
+            bot.send_message(m.chat.id, "😔 Hozircha sizning filtr bo'yicha mos tenderlar topilmadi. Filtrni o'zgartirib ko'ring yoki keyinroq qayta urinib ko'ring.")
+            return
+        text=f"🔥 {len(filtered)} ta yangi tender:\n\n"
+        for t in filtered[:10]:
+            budget_txt = f"{t['budget']:,} so'm" if t['budget'] else "Byudjet saytda ko'rsatilgan"
+            text+=f"📦 {t['name']}\n🔢 {t['lot_number']}\n📍 {t['region']} | 💰 {budget_txt}\n⏰ {t['deadline_date']}\n🔗 {t['link']}\n\n"
+        bot.send_message(m.chat.id, text, disable_web_page_preview=True)
+    except Exception as e:
+        traceback.print_exc()
+        bot.send_message(m.chat.id, f"❌ Hozircha ma'lumotlarni olib bo'lmadi, birozdan so'ng qayta urinib ko'ring.")
 
-if __name__=="__main__":
-    print("🤖 Bot ishga tushdi - Polling mode")
-    executor.start_polling(dp, skip_updates=True)
+print("Tender bot ishga tushdi")
+bot.infinity_polling()
