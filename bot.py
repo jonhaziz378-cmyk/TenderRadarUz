@@ -7,7 +7,7 @@ from telebot.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMar
 from bs4 import BeautifulSoup
 import traceback
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8776730597:AAGr9XbnyixajCnSa_AlyTQDHUjodyQmdto")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8776730597:AAGL_-LqAqZrYd-s7koyHI0Nxm40YCsX_V4")
 DB_FILE = "users.json"
 VILOYATLAR = ["Toshkent sh", "Toshkent vil", "Samarqand", "Buxoro", "Andijon", "Farg'ona", "Namangan", "Qashqadaryo", "Surxondaryo", "Xorazm", "Navoiy", "Jizzax", "Sirdaryo", "Qoraqalpog'iston"]
 KATEGORIYALAR = ["Qurilish", "IT kompyuter", "Tibbiyot dori", "Oziq-ovqat", "Mebel jihoz", "Transport", "Kantselyariya"]
